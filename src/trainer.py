@@ -17,6 +17,9 @@ from src.sobel import Laplacian
 
 def init__result_Dir():
     work_dir = os.path.join(os.getcwd(), 'Training')
+    # Ensure base directory exists
+    if not os.path.exists(work_dir):
+        os.makedirs(work_dir, exist_ok=True)
     max_model = 0
     for root, j, file in os.walk(work_dir):
         for dirs in j:
@@ -29,7 +32,7 @@ def init__result_Dir():
         break
     max_model += 1
     path = os.path.join(work_dir, str(max_model))
-    os.mkdir(path)
+    os.makedirs(path, exist_ok=True)
     return path
 
 

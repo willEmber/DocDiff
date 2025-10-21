@@ -26,21 +26,26 @@ class DocData(Dataset):
         super().__init__()
         self.path_gt = path_gt
         self.path_img = path_img
-        self.data_gt = os.listdir(path_gt)
-        self.data_img = os.listdir(path_img)
         self.mode = mode
+        # Build a sorted intersection of filenames to ensure consistent pairing
+        def list_images(p):
+            return sorted([f for f in os.listdir(p) if f.lower().endswith((".png", ".jpg", ".jpeg"))])
+        gt_files = set(list_images(path_gt))
+        img_files = set(list_images(path_img))
+        self.files = sorted(list(gt_files & img_files))
         if mode == 1:
             self.ImgTrans = (ImageTransform(loadSize)["train"], ImageTransform(loadSize)["train_gt"])
         else:
             self.ImgTrans = ImageTransform(loadSize)["test"]
 
     def __len__(self):
-        return len(self.data_gt)
+        return len(self.files)
 
     def __getitem__(self, idx):
 
-        gt = Image.open(os.path.join(self.path_gt, self.data_img[idx]))
-        img = Image.open(os.path.join(self.path_img, self.data_img[idx]))
+        fname = self.files[idx]
+        gt = Image.open(os.path.join(self.path_gt, fname))
+        img = Image.open(os.path.join(self.path_img, fname))
         img = img.convert('RGB')
         gt = gt.convert('RGB')
         if self.mode == 1:
@@ -52,5 +57,5 @@ class DocData(Dataset):
         else:
             img= self.ImgTrans(img)
             gt = self.ImgTrans(gt)
-        name = self.data_img[idx]
+        name = fname
         return img, gt, name

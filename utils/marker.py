@@ -56,7 +56,7 @@ def add_mark(imagePath, mark, args):
     name = os.path.basename(imagePath)
     if image:
         if not os.path.exists(args.out):
-            os.mkdir(args.out)
+            os.makedirs(args.out, exist_ok=True)
 
         new_name = os.path.join(args.out, name)
         if os.path.splitext(new_name)[1] != '.png':

@@ -8,6 +8,8 @@ import torch
 import torch.optim as optim
 import torch.nn as nn
 import torch.nn.functional as F
+import csv
+import time
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
 from tqdm import tqdm
@@ -119,6 +121,21 @@ class Trainer:
         if self.high_low_freq == 'True':
             self.high_filter = Laplacian().to(self.device)
 
+        # Validation config and loader (used during training)
+        self.val_every = int(getattr(config, 'VAL_EVERY', 0) or 0)
+        self.val_max_samples = int(getattr(config, 'VAL_MAX_SAMPLES', 16) or 16)
+        self.save_best_by = str(getattr(config, 'SAVE_BEST_BY', 'psnr'))
+        self.best_metric = None
+        # Resolve validation paths
+        val_gt = getattr(config, 'VAL_PATH_GT', None) or getattr(config, 'TEST_PATH_GT', None) or self.path_train_gt
+        val_img = getattr(config, 'VAL_PATH_IMG', None) or getattr(config, 'TEST_PATH_IMG', None) or self.path_train_img
+        try:
+            dataset_val = DocData(val_img, val_gt, config.IMAGE_SIZE, 0)
+            self.dataloader_val = DataLoader(dataset_val, batch_size=getattr(config, 'BATCH_SIZE_VAL', 1), shuffle=False,
+                                             drop_last=False, num_workers=config.NUM_WORKERS)
+        except Exception:
+            self.dataloader_val = None
+
     def test(self):
         def crop_concat(img, size=128):
             shape = img.shape
@@ -216,6 +233,16 @@ class Trainer:
         iteration = self.continue_training_steps
         save_img_path = init__result_Dir()
         print('Starting Training', f"Step is {self.num_timesteps}")
+        # Metrics CSV in this run directory
+        metrics_csv = os.path.join(save_img_path, 'metrics.csv')
+        if not os.path.exists(metrics_csv):
+            with open(metrics_csv, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    'iteration', 'loss', 'ddpm_loss',
+                    'pixel_total', 'pixel_plain', 'low_freq_pixel_loss',
+                    'L_inv1', 'lr', 'step_time_sec'
+                ])
 
         while iteration < self.iteration_max:
 
@@ -225,7 +252,7 @@ class Trainer:
                 tq.set_description(f'Iteration {iteration} / {self.iteration_max}')
                 self.network.train()
                 optimizer.zero_grad()
-
+                step_start = time.time()
                 t = torch.randint(0, self.num_timesteps, (img.shape[0],)).long().to(self.device)
                 init_predict, noise_pred, noisy_image, noise_ref = self.network(gt.to(self.device), img.to(self.device),
                                                                                 t, self.diffusion)
@@ -237,12 +264,17 @@ class Trainer:
                         ddpm_loss = self.loss(noise_pred, gt.to(self.device) - init_predict)
                 else:
                     ddpm_loss = self.loss(noise_pred, noise_ref.to(self.device))
+                # Pixel losses (coarse predictor)
+                pixel_total = None
+                pixel_plain = None
+                low_freq_loss = None
                 if self.high_low_freq == 'True':
-                    low_high_loss = self.loss(init_predict, gt.to(self.device))
+                    pixel_plain = self.loss(init_predict, gt.to(self.device))
                     low_freq_loss = self.loss(init_predict - self.high_filter(init_predict), gt.to(self.device) - self.high_filter(gt.to(self.device)))
-                    pixel_loss = low_high_loss + 2*low_freq_loss
+                    pixel_total = pixel_plain + 2*low_freq_loss
                 else:
-                    pixel_loss = self.loss(init_predict, gt.to(self.device))
+                    pixel_plain = self.loss(init_predict, gt.to(self.device))
+                    pixel_total = pixel_plain
                 # One-step invertibility consistency loss (EDICT) when predicting x0
                 L_inv1 = torch.tensor(0.0, device=self.device)
                 if self.pre_ori == 'True' and self.edict_inv1_enabled == 'True':
@@ -267,13 +299,85 @@ class Trainer:
                         if valid_idx.numel() > 0:
                             L_inv1 = F.mse_loss(x_t1_hat.index_select(0, valid_idx), x_t1.index_select(0, valid_idx))
 
-                loss = ddpm_loss + self.beta_loss * (pixel_loss) / self.num_timesteps + self.lambda_inv1 * L_inv1
+                loss = ddpm_loss + self.beta_loss * (pixel_total) / self.num_timesteps + self.lambda_inv1 * L_inv1
                 loss.backward()
                 optimizer.step()
+                step_time = time.time() - step_start
+                # Richer TQDM postfix
                 if self.high_low_freq == 'True':
-                    tq.set_postfix(loss=loss.item(), high_freq_ddpm_loss=ddpm_loss.item(), low_freq_pixel_loss=low_freq_loss.item(), pixel_loss=low_high_loss.item())
+                    tq.set_postfix(
+                        loss=loss.item(), ddpm_loss=ddpm_loss.item(),
+                        pixel_total=pixel_total.item(), pixel_plain=pixel_plain.item(), low_freq_pixel_loss=low_freq_loss.item(),
+                        inv1=L_inv1.item(), t_step=f"{step_time:.2f}s"
+                    )
                 else:
-                    tq.set_postfix(loss=loss.item(), ddpm_loss=ddpm_loss.item(), pixel_loss=pixel_loss.item())
+                    tq.set_postfix(
+                        loss=loss.item(), ddpm_loss=ddpm_loss.item(),
+                        pixel_total=pixel_total.item(), pixel_plain=pixel_plain.item(),
+                        inv1=L_inv1.item(), t_step=f"{step_time:.2f}s"
+                    )
+                # Persist metrics per-iteration
+                try:
+                    with open(metrics_csv, 'a', newline='') as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            iteration, loss.item(), ddpm_loss.item(),
+                            pixel_total.item() if pixel_total is not None else '',
+                            pixel_plain.item() if pixel_plain is not None else '',
+                            low_freq_loss.item() if low_freq_loss is not None else '',
+                            L_inv1.item() if isinstance(L_inv1, torch.Tensor) else float(L_inv1),
+                            optimizer.param_groups[0]['lr'], step_time
+                        ])
+                except Exception:
+                    pass
+
+                # Periodic validation
+                if self.val_every > 0 and iteration > 0 and iteration % self.val_every == 0 and self.dataloader_val is not None:
+                    val_csv = os.path.join(save_img_path, 'val_metrics.csv')
+                    psnr_mean, ssim_mean, inv_mse_mean, inv_cos_mean, n_eval = self.validate(max_samples=self.val_max_samples)
+                    # Print concise metrics for logs
+                    print(f"VAL iter={iteration}: PSNR={psnr_mean:.4f} SSIM={ssim_mean:.4f} | INV_MSE={inv_mse_mean:.6f} INV_COS={inv_cos_mean:.6f} (N={n_eval})")
+                    # Append to CSV
+                    try:
+                        if not os.path.exists(val_csv):
+                            with open(val_csv, 'w', newline='') as f:
+                                writer = csv.writer(f)
+                                writer.writerow(['iteration', 'psnr', 'ssim', 'inv_mse', 'inv_cossim', 'n'])
+                        with open(val_csv, 'a', newline='') as f:
+                            writer = csv.writer(f)
+                            writer.writerow([iteration, psnr_mean, ssim_mean, inv_mse_mean, inv_cos_mean, n_eval])
+                    except Exception:
+                        pass
+                    # Save best checkpoint by selected metric
+                    key = self.save_best_by.lower()
+                    metric_val = {
+                        'psnr': psnr_mean,
+                        'ssim': ssim_mean,
+                        'inv_mse': inv_mse_mean,
+                        'inv_cos': inv_cos_mean,
+                    }.get(key, psnr_mean)
+                    better = False
+                    if self.best_metric is None:
+                        better = True
+                    else:
+                        if key in ('psnr', 'ssim', 'inv_cos'):
+                            better = metric_val > self.best_metric
+                        else:  # inv_mse smaller is better
+                            better = metric_val < self.best_metric
+                    if better:
+                        self.best_metric = metric_val
+                        # Save current weights as best
+                        if not os.path.exists(self.weight_save_path):
+                            os.makedirs(self.weight_save_path)
+                        torch.save(self.network.init_predictor.state_dict(),
+                                   os.path.join(self.weight_save_path, f'model_init_best_{key}.pth'))
+                        torch.save(self.network.denoiser.state_dict(),
+                                   os.path.join(self.weight_save_path, f'model_denoiser_best_{key}.pth'))
+                        if self.EMA_or_not == 'True':
+                            torch.save(self.ema_model.init_predictor.state_dict(),
+                                       os.path.join(self.weight_save_path, f'model_init_ema_best_{key}.pth'))
+                            torch.save(self.ema_model.denoiser.state_dict(),
+                                       os.path.join(self.weight_save_path, f'model_denoiser_ema_best_{key}.pth'))
                 if iteration % 500 == 0:
                     if not os.path.exists(save_img_path):
                         os.makedirs(save_img_path)
@@ -304,6 +408,96 @@ class Trainer:
                                    os.path.join(self.weight_save_path, f'model_init_ema_{iteration}.pth'))
                         torch.save(self.ema_model.denoiser.state_dict(),
                                    os.path.join(self.weight_save_path, f'model_denoiser_ema_{iteration}.pth'))
+                    # Also update latest pointers
+                    torch.save(self.network.init_predictor.state_dict(),
+                               os.path.join(self.weight_save_path, f'model_init_latest.pth'))
+                    torch.save(self.network.denoiser.state_dict(),
+                               os.path.join(self.weight_save_path, f'model_denoiser_latest.pth'))
+                    if self.EMA_or_not == 'True':
+                        torch.save(self.ema_model.init_predictor.state_dict(),
+                                   os.path.join(self.weight_save_path, f'model_init_ema_latest.pth'))
+                        torch.save(self.ema_model.denoiser.state_dict(),
+                                   os.path.join(self.weight_save_path, f'model_denoiser_ema_latest.pth'))
+
+    @torch.no_grad()
+    def _compute_psnr(self, x: torch.Tensor, y: torch.Tensor) -> float:
+        # x,y in [0,1]
+        mse = F.mse_loss(x, y).item()
+        if mse == 0:
+            return 100.0
+        return 10.0 * float(torch.log10(torch.tensor(1.0 / mse)))
+
+    @torch.no_grad()
+    def _compute_ssim(self, x: torch.Tensor, y: torch.Tensor) -> float:
+        # Simple SSIM implementation with Gaussian window, works on [0,1]
+        C1 = 0.01 ** 2
+        C2 = 0.03 ** 2
+        # Gaussian window 11x11
+        def _gaussian(window_size=11, sigma=1.5):
+            coords = torch.arange(window_size, dtype=x.dtype, device=x.device) - window_size // 2
+            g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+            g = (g / g.sum()).unsqueeze(1)
+            win = g @ g.t()
+            return win
+        win = _gaussian(11, 1.5)
+        win = win.expand(x.shape[1], 1, 11, 11).contiguous()
+        conv = F.conv2d
+        mu_x = conv(x, win, padding=5, groups=x.shape[1])
+        mu_y = conv(y, win, padding=5, groups=y.shape[1])
+        mu_x2 = mu_x * mu_x
+        mu_y2 = mu_y * mu_y
+        mu_xy = mu_x * mu_y
+        sigma_x2 = conv(x * x, win, padding=5, groups=x.shape[1]) - mu_x2
+        sigma_y2 = conv(y * y, win, padding=5, groups=y.shape[1]) - mu_y2
+        sigma_xy = conv(x * y, win, padding=5, groups=x.shape[1]) - mu_xy
+        ssim_map = ((2 * mu_xy + C1) * (2 * sigma_xy + C2)) / ((mu_x2 + mu_y2 + C1) * (sigma_x2 + sigma_y2 + C2))
+        return ssim_map.mean().item()
+
+    @torch.no_grad()
+    def validate(self, max_samples: int = 16):
+        if self.dataloader_val is None:
+            return 0.0, 0.0, 0.0, 0.0, 0
+        self.network.eval()
+        psnr_sum = 0.0
+        ssim_sum = 0.0
+        inv_mse_sum = 0.0
+        inv_cos_sum = 0.0
+        n = 0
+        for img, gt, _ in self.dataloader_val:
+            if n >= max_samples:
+                break
+            img = img.to(self.device)
+            gt = gt.to(self.device)
+            # Inject noise
+            noisyImage = torch.randn_like(img)
+            # Coarse prediction
+            init_predict = self.network.init_predictor(img, 0)
+            # Residual sampling
+            if self.DPM_SOLVER == 'True':
+                sampled = dpm_solver(self.schedule.get_betas(), self.network,
+                                     torch.cat((noisyImage, img), dim=1), self.DPM_STEP)
+            elif self.EDICT == 'True':
+                sampled = self.edict_sampler.sample(noisyImage, init_predict, pre_ori=(self.pre_ori == 'True'),
+                                                    p=float(self.EDICT_P), use_fp64=(self.EDICT_FP64 == 'True'))
+            else:
+                sampled = self.diffusion(noisyImage, init_predict, self.pre_ori)
+            # Final reconstruction
+            recon = (sampled + init_predict).clamp(0, 1)
+            # Metrics
+            psnr_sum += self._compute_psnr(recon, gt)
+            ssim_sum += self._compute_ssim(recon, gt)
+            # Inversion metrics (EDICT only)
+            if self.EDICT == 'True':
+                xT_rec = self.edict_sampler.invert(sampled, cond=init_predict, pre_ori=(self.pre_ori == 'True'),
+                                                   p=float(self.EDICT_P), use_fp64=(self.EDICT_FP64 == 'True'))
+                inv_mse_sum += F.mse_loss(xT_rec, noisyImage).item()
+                inv_cos_sum += torch.nn.functional.cosine_similarity(
+                    xT_rec.flatten(1), noisyImage.flatten(1), dim=1
+                ).mean().item()
+            n += 1
+        if n == 0:
+            return 0.0, 0.0, 0.0, 0.0, 0
+        return psnr_sum / n, ssim_sum / n, inv_mse_sum / max(n, 1), inv_cos_sum / max(n, 1), n
 
 
 

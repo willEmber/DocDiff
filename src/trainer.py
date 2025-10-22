@@ -17,23 +17,33 @@ import copy
 from src.sobel import Laplacian
 
 
-def init__result_Dir():
+def init__result_Dir(experiment_name: str = None):
     work_dir = os.path.join(os.getcwd(), 'Training')
     # Ensure base directory exists
     if not os.path.exists(work_dir):
         os.makedirs(work_dir, exist_ok=True)
+    # If a name is provided, use it directly (unique per experiment)
+    if experiment_name and len(str(experiment_name)) > 0:
+        path = os.path.join(work_dir, str(experiment_name))
+        os.makedirs(path, exist_ok=True)
+        return path
+    # Else, allocate next incremental index with timestamp suffix for uniqueness
     max_model = 0
     for root, j, file in os.walk(work_dir):
         for dirs in j:
             try:
-                temp = int(dirs)
+                # allow names like "12" or "12_20250101_1200"
+                head = dirs.split('_')[0]
+                temp = int(head)
                 if temp > max_model:
                     max_model = temp
             except:
                 continue
         break
     max_model += 1
-    path = os.path.join(work_dir, str(max_model))
+    import time as _time
+    ts = _time.strftime('%Y%m%d_%H%M%S')
+    path = os.path.join(work_dir, f"{max_model}_{ts}")
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -74,6 +84,7 @@ class Trainer:
         self.save_model_every = config.SAVE_MODEL_EVERY
         self.EMA_or_not = config.EMA
         self.weight_save_path = config.WEIGHT_SAVE_PATH
+        self.experiment_name = getattr(config, 'EXPERIMENT_NAME', '')
         self.TEST_INITIAL_PREDICTOR_WEIGHT_PATH = config.TEST_INITIAL_PREDICTOR_WEIGHT_PATH
         self.TEST_DENOISER_WEIGHT_PATH = config.TEST_DENOISER_WEIGHT_PATH
         self.DPM_SOLVER = config.DPM_SOLVER
@@ -231,8 +242,13 @@ class Trainer:
     def train(self):
         optimizer = optim.AdamW(self.network.parameters(), lr=self.LR, weight_decay=1e-4)
         iteration = self.continue_training_steps
-        save_img_path = init__result_Dir()
+        save_img_path = init__result_Dir(self.experiment_name)
+        # Per-run checkpoint directory inside weight root
+        run_id = os.path.basename(save_img_path)
+        weight_save_dir = os.path.join(self.weight_save_path, run_id)
+        os.makedirs(weight_save_dir, exist_ok=True)
         print('Starting Training', f"Step is {self.num_timesteps}")
+        print(f"Run dir: {save_img_path} | Checkpoints: {weight_save_dir}")
         # Metrics CSV in this run directory
         metrics_csv = os.path.join(save_img_path, 'metrics.csv')
         if not os.path.exists(metrics_csv):
@@ -367,17 +383,17 @@ class Trainer:
                     if better:
                         self.best_metric = metric_val
                         # Save current weights as best
-                        if not os.path.exists(self.weight_save_path):
-                            os.makedirs(self.weight_save_path)
-                        torch.save(self.network.init_predictor.state_dict(),
-                                   os.path.join(self.weight_save_path, f'model_init_best_{key}.pth'))
-                        torch.save(self.network.denoiser.state_dict(),
-                                   os.path.join(self.weight_save_path, f'model_denoiser_best_{key}.pth'))
-                        if self.EMA_or_not == 'True':
-                            torch.save(self.ema_model.init_predictor.state_dict(),
-                                       os.path.join(self.weight_save_path, f'model_init_ema_best_{key}.pth'))
-                            torch.save(self.ema_model.denoiser.state_dict(),
-                                       os.path.join(self.weight_save_path, f'model_denoiser_ema_best_{key}.pth'))
+                    if not os.path.exists(weight_save_dir):
+                        os.makedirs(weight_save_dir)
+                    torch.save(self.network.init_predictor.state_dict(),
+                               os.path.join(weight_save_dir, f'model_init_best_{key}.pth'))
+                    torch.save(self.network.denoiser.state_dict(),
+                               os.path.join(weight_save_dir, f'model_denoiser_best_{key}.pth'))
+                    if self.EMA_or_not == 'True':
+                        torch.save(self.ema_model.init_predictor.state_dict(),
+                                   os.path.join(weight_save_dir, f'model_init_ema_best_{key}.pth'))
+                        torch.save(self.ema_model.denoiser.state_dict(),
+                                   os.path.join(weight_save_dir, f'model_denoiser_ema_best_{key}.pth'))
                 if iteration % 500 == 0:
                     if not os.path.exists(save_img_path):
                         os.makedirs(save_img_path)
@@ -397,27 +413,27 @@ class Trainer:
 
                 if iteration % self.save_model_every == 0:
                     print('Saving models')
-                    if not os.path.exists(self.weight_save_path):
-                        os.makedirs(self.weight_save_path)
+                    if not os.path.exists(weight_save_dir):
+                        os.makedirs(weight_save_dir)
                     torch.save(self.network.init_predictor.state_dict(),
-                               os.path.join(self.weight_save_path, f'model_init_{iteration}.pth'))
+                               os.path.join(weight_save_dir, f'model_init_{iteration}.pth'))
                     torch.save(self.network.denoiser.state_dict(),
-                               os.path.join(self.weight_save_path, f'model_denoiser_{iteration}.pth'))
+                               os.path.join(weight_save_dir, f'model_denoiser_{iteration}.pth'))
                     if self.EMA_or_not == 'True':
                         torch.save(self.ema_model.init_predictor.state_dict(),
-                                   os.path.join(self.weight_save_path, f'model_init_ema_{iteration}.pth'))
+                                   os.path.join(weight_save_dir, f'model_init_ema_{iteration}.pth'))
                         torch.save(self.ema_model.denoiser.state_dict(),
-                                   os.path.join(self.weight_save_path, f'model_denoiser_ema_{iteration}.pth'))
+                                   os.path.join(weight_save_dir, f'model_denoiser_ema_{iteration}.pth'))
                     # Also update latest pointers
                     torch.save(self.network.init_predictor.state_dict(),
-                               os.path.join(self.weight_save_path, f'model_init_latest.pth'))
+                               os.path.join(weight_save_dir, f'model_init_latest.pth'))
                     torch.save(self.network.denoiser.state_dict(),
-                               os.path.join(self.weight_save_path, f'model_denoiser_latest.pth'))
+                               os.path.join(weight_save_dir, f'model_denoiser_latest.pth'))
                     if self.EMA_or_not == 'True':
                         torch.save(self.ema_model.init_predictor.state_dict(),
-                                   os.path.join(self.weight_save_path, f'model_init_ema_latest.pth'))
+                                   os.path.join(weight_save_dir, f'model_init_ema_latest.pth'))
                         torch.save(self.ema_model.denoiser.state_dict(),
-                                   os.path.join(self.weight_save_path, f'model_denoiser_ema_latest.pth'))
+                                   os.path.join(weight_save_dir, f'model_denoiser_ema_latest.pth'))
 
     @torch.no_grad()
     def _compute_psnr(self, x: torch.Tensor, y: torch.Tensor) -> float:

@@ -12,6 +12,9 @@ NUM_HEADS: 1
 MODE: 1 # 1 Train, 0 Test
 PRE_ORI: "True" # if True, predict $x_0$, else predict $\epsilon$.
 
+# experiment/run naming (optional)
+EXPERIMENT_NAME: "div2kEDICT" # if set, outputs go to Training/<EXPERIMENT_NAME> and checksave/<EXPERIMENT_NAME>
+
 # train
 PATH_GT: "/data/project/dataset/DIV2K/DIV2K/DIV2K_train_HR" # path of ground truth
 PATH_IMG: "/data/project/dataset/DIV2K/DIV2K/DIV2K_train_HR_gauss15" # path of input

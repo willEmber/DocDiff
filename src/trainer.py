@@ -351,12 +351,13 @@ class Trainer:
                 except Exception:
                     pass
 
-                # Periodic validation
-                if self.val_every > 0 and iteration > 0 and iteration % self.val_every == 0 and self.dataloader_val is not None:
+                # Periodic validation: trigger on the next iteration number (post-update)
+                iter_next = iteration + 1
+                if self.val_every > 0 and iter_next % self.val_every == 0 and self.dataloader_val is not None:
                     val_csv = os.path.join(save_img_path, 'val_metrics.csv')
                     psnr_mean, ssim_mean, inv_mse_mean, inv_cos_mean, n_eval = self.validate(max_samples=self.val_max_samples)
                     # Print concise metrics for logs
-                    print(f"VAL iter={iteration}: PSNR={psnr_mean:.4f} SSIM={ssim_mean:.4f} | INV_MSE={inv_mse_mean:.6f} INV_COS={inv_cos_mean:.6f} (N={n_eval})")
+                    print(f"VAL iter={iter_next}: PSNR={psnr_mean:.4f} SSIM={ssim_mean:.4f} | INV_MSE={inv_mse_mean:.6f} INV_COS={inv_cos_mean:.6f} (N={n_eval})")
                     # Append to CSV
                     try:
                         if not os.path.exists(val_csv):
@@ -365,7 +366,7 @@ class Trainer:
                                 writer.writerow(['iteration', 'psnr', 'ssim', 'inv_mse', 'inv_cossim', 'n'])
                         with open(val_csv, 'a', newline='') as f:
                             writer = csv.writer(f)
-                            writer.writerow([iteration, psnr_mean, ssim_mean, inv_mse_mean, inv_cos_mean, n_eval])
+                            writer.writerow([iter_next, psnr_mean, ssim_mean, inv_mse_mean, inv_cos_mean, n_eval])
                     except Exception:
                         pass
                     # Save best checkpoint by selected metric

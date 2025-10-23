@@ -109,6 +109,45 @@ class Trainer:
             self.network.denoiser.load_state_dict(torch.load(self.pretrained_path_denoiser))
             self.continue_training_steps = config.CONTINUE_TRAINING_STEPS
         from data.docdata import DocData
+
+        # ---------- Basic config sanity checks (paths, image size) ----------
+        def _fmt_size(sz):
+            try:
+                return f"{int(sz[0])}x{int(sz[1])}" if isinstance(sz, (list, tuple)) else str(sz)
+            except Exception:
+                return str(sz)
+
+        # IMAGE_SIZE check: expect [H, W] and multiples of 8 for UNet down/up-sampling
+        if isinstance(self.image_size, (list, tuple)) and len(self.image_size) == 2:
+            h_ok = (int(self.image_size[0]) % 8 == 0)
+            w_ok = (int(self.image_size[1]) % 8 == 0)
+            if not (h_ok and w_ok):
+                print(f"[WARN] IMAGE_SIZE={_fmt_size(self.image_size)} is not multiple of 8; training will still run (RandomCrop), but UNet alignment may be suboptimal.")
+        else:
+            print(f"[WARN] IMAGE_SIZE format unexpected: {_fmt_size(self.image_size)} (expect [H, W]).")
+
+        # Helper to summarize directory and file intersection status
+        def _dir_ok(p: str) -> bool:
+            try:
+                return isinstance(p, str) and len(p) > 0 and os.path.isdir(p)
+            except Exception:
+                return False
+
+        def _list_images(p: str):
+            try:
+                return sorted([f for f in os.listdir(p) if f.lower().endswith((".png", ".jpg", ".jpeg"))]) if _dir_ok(p) else []
+            except Exception:
+                return []
+
+        # Train dataset summary
+        train_img_list = _list_images(self.path_train_img)
+        train_gt_list = _list_images(self.path_train_gt)
+        train_pairs = sorted(list(set(train_img_list) & set(train_gt_list)))
+        if not _dir_ok(self.path_train_img) or not _dir_ok(self.path_train_gt):
+            print(f"[ERROR] Training paths invalid: PATH_IMG='{self.path_train_img}', PATH_GT='{self.path_train_gt}'")
+        else:
+            print(f"[DATA] Train IMG='{self.path_train_img}' ({len(train_img_list)} imgs) | GT='{self.path_train_gt}' ({len(train_gt_list)} imgs) | pairs={len(train_pairs)}")
+
         if self.mode == 1:
             dataset_train = DocData(self.path_train_img, self.path_train_gt, config.IMAGE_SIZE, self.mode)
             self.batch_size = config.BATCH_SIZE
@@ -141,13 +180,38 @@ class Trainer:
         # Resolve validation paths
         val_gt = getattr(config, 'VAL_PATH_GT', None) or getattr(config, 'TEST_PATH_GT', None) or self.path_train_gt
         val_img = getattr(config, 'VAL_PATH_IMG', None) or getattr(config, 'TEST_PATH_IMG', None) or self.path_train_img
-        try:
-            dataset_val = DocData(val_img, val_gt, config.IMAGE_SIZE, 0,
-                                  resize_test=(self.native_resolution != 'True'))
-            self.dataloader_val = DataLoader(dataset_val, batch_size=getattr(config, 'BATCH_SIZE_VAL', 1), shuffle=False,
-                                             drop_last=False, num_workers=config.NUM_WORKERS)
-        except Exception:
+
+        # Validation dataset summary and loader creation with diagnostics
+        val_img_list = _list_images(val_img)
+        val_gt_list = _list_images(val_gt)
+        val_pairs = sorted(list(set(val_img_list) & set(val_gt_list)))
+        if self.val_every <= 0:
+            print("[INFO] Validation disabled (VAL_EVERY <= 0).")
             self.dataloader_val = None
+        else:
+            if not _dir_ok(val_img) or not _dir_ok(val_gt):
+                print(f"[WARN] Validation paths invalid: VAL_PATH_IMG='{val_img}', VAL_PATH_GT='{val_gt}'. Validation will be skipped.")
+                self.dataloader_val = None
+            elif len(val_pairs) == 0:
+                print(f"[WARN] Validation has 0 paired samples (IMG='{val_img_list[:3]}', GT='{val_gt_list[:3]}'). Validation will run with N=0 and be skipped effectively.")
+                try:
+                    dataset_val = DocData(val_img, val_gt, config.IMAGE_SIZE, 0,
+                                          resize_test=(self.native_resolution != 'True'))
+                    self.dataloader_val = DataLoader(dataset_val, batch_size=getattr(config, 'BATCH_SIZE_VAL', 1), shuffle=False,
+                                                     drop_last=False, num_workers=config.NUM_WORKERS)
+                except Exception as e:
+                    print(f"[WARN] Creating validation loader failed: {e}. Validation disabled.")
+                    self.dataloader_val = None
+            else:
+                try:
+                    dataset_val = DocData(val_img, val_gt, config.IMAGE_SIZE, 0,
+                                          resize_test=(self.native_resolution != 'True'))
+                    self.dataloader_val = DataLoader(dataset_val, batch_size=getattr(config, 'BATCH_SIZE_VAL', 1), shuffle=False,
+                                                     drop_last=False, num_workers=config.NUM_WORKERS)
+                    print(f"[DATA] Val IMG='{val_img}' ({len(val_img_list)} imgs) | GT='{val_gt}' ({len(val_gt_list)} imgs) | pairs={len(val_pairs)} | will validate every {self.val_every} iters (max {self.val_max_samples} samples)")
+                except Exception as e:
+                    print(f"[WARN] Creating validation loader failed: {e}. Validation disabled.")
+                    self.dataloader_val = None
 
     def test(self):
         def crop_concat(img, size=128):

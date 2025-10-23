@@ -115,7 +115,8 @@ class Trainer:
             self.dataloader_train = DataLoader(dataset_train, batch_size=self.batch_size, shuffle=True, drop_last=False,
                                                num_workers=config.NUM_WORKERS)
         else:
-            dataset_test = DocData(config.TEST_PATH_IMG, config.TEST_PATH_GT, config.IMAGE_SIZE, self.mode)
+            dataset_test = DocData(config.TEST_PATH_IMG, config.TEST_PATH_GT, config.IMAGE_SIZE, self.mode,
+                                   resize_test=(self.native_resolution != 'True'))
             self.dataloader_test = DataLoader(dataset_test, batch_size=config.BATCH_SIZE_VAL, shuffle=False,
                                               drop_last=False,
                                               num_workers=config.NUM_WORKERS)
@@ -141,7 +142,8 @@ class Trainer:
         val_gt = getattr(config, 'VAL_PATH_GT', None) or getattr(config, 'TEST_PATH_GT', None) or self.path_train_gt
         val_img = getattr(config, 'VAL_PATH_IMG', None) or getattr(config, 'TEST_PATH_IMG', None) or self.path_train_img
         try:
-            dataset_val = DocData(val_img, val_gt, config.IMAGE_SIZE, 0)
+            dataset_val = DocData(val_img, val_gt, config.IMAGE_SIZE, 0,
+                                  resize_test=(self.native_resolution != 'True'))
             self.dataloader_val = DataLoader(dataset_val, batch_size=getattr(config, 'BATCH_SIZE_VAL', 1), shuffle=False,
                                              drop_last=False, num_workers=config.NUM_WORKERS)
         except Exception:
@@ -189,9 +191,11 @@ class Trainer:
             for img, gt, name in tq:
                 tq.set_description(f'Iteration {iteration} / {len(self.dataloader_test.dataset)}')
                 iteration += 1
+                # use IMAGE_SIZE as tile size when using native resolution tiling
+                tile_size = int(self.image_size[0]) if isinstance(self.image_size, (list, tuple)) else int(self.image_size)
                 if self.native_resolution == 'True':
                     temp = img
-                    img = crop_concat(img)
+                    img = crop_concat(img, size=tile_size)
                 noisyImage = torch.randn_like(img).to(self.device)
                 init_predict = self.network.init_predictor(img.to(self.device), 0)
 
@@ -479,6 +483,34 @@ class Trainer:
         inv_mse_sum = 0.0
         inv_cos_sum = 0.0
         n = 0
+        # helper tiling functions (mirror test())
+        def crop_concat(img, size=128):
+            shape = img.shape
+            correct_shape = (size * (shape[2] // size + 1), size * (shape[3] // size + 1))
+            one = torch.ones((shape[0], shape[1], correct_shape[0], correct_shape[1]), device=img.device, dtype=img.dtype)
+            one[:, :, :shape[2], :shape[3]] = img
+            # crop
+            tiles = []
+            for i in range(shape[2] // size + 1):
+                for j in range(shape[3] // size + 1):
+                    tiles.append(one[:, :, i * size:(i + 1) * size, j * size:(j + 1) * size])
+            return torch.cat(tiles, dim=0)
+
+        def crop_concat_back(img, prediction, size=128):
+            shape = img.shape
+            rows = []
+            idx = 0
+            for i in range(shape[2] // size + 1):
+                row = []
+                for j in range(shape[3] // size + 1):
+                    row.append(prediction[idx * shape[0]:(idx + 1) * shape[0], :, :, :])
+                    idx += 1
+                rows.append(torch.cat(row, dim=3))
+            out = torch.cat(rows, dim=2)
+            return out[:, :, :shape[2], :shape[3]]
+
+        tile_size = int(self.image_size[0]) if isinstance(self.image_size, (list, tuple)) else int(self.image_size)
+
         for img, gt, _ in self.dataloader_val:
             if n >= max_samples:
                 break
@@ -486,6 +518,15 @@ class Trainer:
             gt = gt.to(self.device)
             # Inject noise
             noisyImage = torch.randn_like(img)
+
+            # Tiling if needed to satisfy network down/up-sampling grid
+            H, W = img.shape[2], img.shape[3]
+            do_tile = (H % tile_size != 0) or (W % tile_size != 0) or (H != tile_size or W != tile_size)
+            if do_tile:
+                img_src = img
+                img = crop_concat(img, size=tile_size)
+                noisyImage = torch.randn_like(img)
+
             # Coarse prediction
             init_predict = self.network.init_predictor(img, 0)
             # Residual sampling
@@ -499,6 +540,8 @@ class Trainer:
                 sampled = self.diffusion(noisyImage, init_predict, self.pre_ori)
             # Final reconstruction
             recon = (sampled + init_predict).clamp(0, 1)
+            if do_tile:
+                recon = crop_concat_back(img_src, recon, size=tile_size)
             # Metrics
             psnr_sum += self._compute_psnr(recon, gt)
             ssim_sum += self._compute_ssim(recon, gt)

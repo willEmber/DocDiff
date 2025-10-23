@@ -1,19 +1,21 @@
 import os
 import torch
 from torch.utils.data import Dataset
-from torchvision.transforms import Compose, ToTensor, RandomAffine, RandomHorizontalFlip, RandomCrop
+from torchvision.transforms import Compose, ToTensor, RandomAffine, RandomHorizontalFlip, RandomCrop, Resize, InterpolationMode
 from PIL import Image
 
 
-def ImageTransform(loadSize):
+def ImageTransform(loadSize, resize_test: bool = False):
+    test_tf = [ToTensor()]
+    if resize_test:
+        # Resize to configured IMAGE_SIZE for eval when not using native resolution
+        test_tf = [Resize(loadSize, interpolation=InterpolationMode.BICUBIC), ToTensor()]
     return {"train": Compose([
         RandomCrop(loadSize, pad_if_needed=True, padding_mode='constant', fill=255),
         RandomAffine(10, fill=255),
         RandomHorizontalFlip(p=0.2),
         ToTensor(),
-    ]), "test": Compose([
-        ToTensor(),
-    ]), "train_gt": Compose([
+    ]), "test": Compose(test_tf), "train_gt": Compose([
         RandomCrop(loadSize, pad_if_needed=True, padding_mode='constant', fill=255),
         RandomAffine(10, fill=255),
         RandomHorizontalFlip(p=0.2),
@@ -22,7 +24,7 @@ def ImageTransform(loadSize):
 
 
 class DocData(Dataset):
-    def __init__(self, path_img, path_gt, loadSize, mode=1):
+    def __init__(self, path_img, path_gt, loadSize, mode=1, resize_test: bool = False):
         super().__init__()
         self.path_gt = path_gt
         self.path_img = path_img
@@ -36,7 +38,7 @@ class DocData(Dataset):
         if mode == 1:
             self.ImgTrans = (ImageTransform(loadSize)["train"], ImageTransform(loadSize)["train_gt"])
         else:
-            self.ImgTrans = ImageTransform(loadSize)["test"]
+            self.ImgTrans = ImageTransform(loadSize, resize_test=resize_test)["test"]
 
     def __len__(self):
         return len(self.files)

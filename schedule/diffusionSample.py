@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 import torchvision.utils
 
 
@@ -35,7 +34,8 @@ class GaussianDiffusion(nn.Module):
         alphas = 1. - self.betas
         alphas_bar = torch.cumprod(alphas, dim=0)
         alphas_bar_prev = F.pad(alphas_bar, [1, 0], value=1)[:T]
-        gammas = alphas_bar
+        # Use double precision for abar-related buffers to minimize long-chain drift
+        gammas = alphas_bar.double()
 
         self.register_buffer('coeff1', torch.sqrt(1. / alphas))
         self.register_buffer('coeff2', self.coeff1 * (1. - alphas) / torch.sqrt(1. - alphas_bar))
@@ -43,8 +43,8 @@ class GaussianDiffusion(nn.Module):
 
         # calculation for q(y_t|y_{t-1})
         self.register_buffer('gammas', gammas)
-        self.register_buffer('sqrt_one_minus_gammas', np.sqrt(1 - gammas))
-        self.register_buffer('sqrt_gammas', np.sqrt(gammas))
+        self.register_buffer('sqrt_one_minus_gammas', torch.sqrt(1. - gammas))
+        self.register_buffer('sqrt_gammas', torch.sqrt(gammas))
 
     def predict_xt_prev_mean_from_eps(self, x_t, t, eps):
         assert x_t.shape == eps.shape
@@ -64,7 +64,10 @@ class GaussianDiffusion(nn.Module):
     def noisy_image(self, t, y):
         """ Compute y_noisy according to (6) p15 of [2]"""
         noise = torch.randn_like(y)
-        y_noisy = extract_(self.sqrt_gammas, t, y.shape) * y + extract_(self.sqrt_one_minus_gammas, t, noise.shape) * noise
+        # sqrt_* are kept in float64; cast to match y/noise dtype during computation
+        sg = extract_(self.sqrt_gammas, t, y.shape).to(y.dtype)
+        somg = extract_(self.sqrt_one_minus_gammas, t, noise.shape).to(noise.dtype)
+        y_noisy = sg * y + somg * noise
         return y_noisy, noise
 
     def forward(self, x_T, cond, pre_ori='False'):
@@ -87,9 +90,12 @@ class GaussianDiffusion(nn.Module):
             else:
                 if time_step > 0:
                     ori = self.model(torch.cat((x_t, cond_), dim=1), t)
-                    eps = x_t - extract_(self.sqrt_gammas, t, ori.shape) * ori
-                    eps = eps / extract_(self.sqrt_one_minus_gammas, t, eps.shape)
-                    x_t = extract_(self.sqrt_gammas, t - 1, ori.shape) * ori + extract_(self.sqrt_one_minus_gammas, t - 1, eps.shape) * eps
+                    eps = x_t - extract_(self.sqrt_gammas, t, ori.shape).to(ori.dtype) * ori
+                    eps = eps / extract_(self.sqrt_one_minus_gammas, t, eps.shape).to(eps.dtype)
+                    x_t = (
+                        extract_(self.sqrt_gammas, t - 1, ori.shape).to(ori.dtype) * ori
+                        + extract_(self.sqrt_one_minus_gammas, t - 1, eps.shape).to(eps.dtype) * eps
+                    )
                 else:
                     x_t = self.model(torch.cat((x_t, cond_), dim=1), t)
 

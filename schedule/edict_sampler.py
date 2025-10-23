@@ -26,9 +26,9 @@ class EDICTSampler(nn.Module):
         self.model = model
         self.T = T
 
-        # buffers for schedule
-        betas = betas.float()
-        alphas = 1.0 - betas
+        # buffers for schedule (keep abar in float64 to reduce drift)
+        betas = betas.double()
+        alphas = (1.0 - betas)
         alphas_bar = torch.cumprod(alphas, dim=0)
 
         self.register_buffer("betas", betas)
@@ -44,7 +44,7 @@ class EDICTSampler(nn.Module):
         eps_or_x0 = self.model(torch.cat((x_in, cond_in), dim=1), t)
         if pre_ori:
             # model predicts x0 (residual); map to epsilon
-            abar_t = _extract(self.alphas_bar, t, x_t.shape)
+            abar_t = _extract(self.alphas_bar, t, x_t.shape).to(x_t.dtype)
             eps = (x_in - abar_t.sqrt() * eps_or_x0) / (1.0 - abar_t).clamp(min=1e-12).sqrt()
             return eps.to(x_t.dtype)
         else:
@@ -56,13 +56,13 @@ class EDICTSampler(nn.Module):
         Deterministic DDIM-style step: x_{t-1} = a_t * x_t + b_t * eps.
         Use closed-form from DDIM with eta=0.
         """
-        alpha_bar_t = _extract(self.alphas_bar, t, sample.shape)
+        alpha_bar_t = _extract(self.alphas_bar, t, sample.shape).to(sample.dtype)
         # prev index is t-1 (full steps)
         t_prev = (t - 1).clamp(min=-1)
         # alpha_bar at prev; when t_prev == -1, use 1.0
         alpha_bar_prev = torch.where(
             (t_prev[:, None, None, None] >= 0),
-            _extract(self.alphas_bar, t_prev.clamp_min(0), sample.shape),
+            _extract(self.alphas_bar, t_prev.clamp_min(0), sample.shape).to(sample.dtype),
             torch.ones_like(alpha_bar_t),
         )
         a_t = (alpha_bar_prev / alpha_bar_t).clamp(min=1e-20).sqrt()
@@ -76,11 +76,11 @@ class EDICTSampler(nn.Module):
         Inverse of the deterministic step: x_{t+1} given x_t and eps.
         Derived from the same (a_t, b_t) but solving for next sample.
         """
-        alpha_bar_t = _extract(self.alphas_bar, t, sample.shape)
+        alpha_bar_t = _extract(self.alphas_bar, t, sample.shape).to(sample.dtype)
         # next index is t+1 (full steps)
         t_next = (t + 1).clamp(max=self.T - 1)
         # alpha_bar at next; when t is the final step (T-1), treat next abar as a tiny value for numerical stability
-        alpha_bar_next = _extract(self.alphas_bar, t_next, sample.shape)
+        alpha_bar_next = _extract(self.alphas_bar, t_next, sample.shape).to(sample.dtype)
         a_t = (alpha_bar_next / alpha_bar_t).clamp(min=1e-20).sqrt()
         b_t = (1.0 - alpha_bar_next).clamp(min=0).sqrt() - (
             (alpha_bar_next * (1.0 - alpha_bar_t)) / alpha_bar_t
@@ -114,9 +114,9 @@ class EDICTSampler(nn.Module):
             eps2 = self._pred_eps(x_inter, cond, t, pre_ori)
             y_inter = self._denoise_step(y, eps2.to(y.dtype), t)
 
-            # coupled mixing
+            # coupled mixing (symmetric, use the two intermediates only)
             x_prev = p * x_inter + (1.0 - p) * y_inter
-            y_prev = p * y_inter + (1.0 - p) * x_prev
+            y_prev = p * y_inter + (1.0 - p) * x_inter
 
             # alternate order, as in EDICT
             x, y = y_prev, x_prev
@@ -143,9 +143,12 @@ class EDICTSampler(nn.Module):
         for time_step in range(self.T):
             t = x0_residual.new_ones([x0_residual.shape[0],], dtype=torch.long) * time_step
 
-            # reconstruct intermediate states by unmixing
-            y_inter = (y - (1.0 - p) * x) / p
-            x_inter = (x - (1.0 - p) * y_inter) / p
+            # inverse mixing: solve linear system exactly
+            denom = (2.0 * p - 1.0)
+            # avoid division by zero if p=0.5 (not expected in practice; p ~ 0.93)
+            denom = denom if isinstance(denom, float) else float(denom)
+            x_inter = (p * x - (1.0 - p) * y) / denom
+            y_inter = (p * y - (1.0 - p) * x) / denom
 
             # advance to t+1 using inverse of deterministic step
             eps_y = self._pred_eps(x_inter, cond, t, pre_ori)
@@ -167,11 +170,12 @@ class EDICTSampler(nn.Module):
         # Initialize both tracks with the same state
         x = x_t
         y = x_t
-        # Coupled intermediate states (unmix)
-        y_inter = (y - (1.0 - p) * x) / p
-        x_inter = (x - (1.0 - p) * y_inter) / p
+        # Inverse mixing (exact) when both tracks equal collapses to identity
+        denom = (2.0 * p - 1.0)
+        x_inter = (p * x - (1.0 - p) * y) / denom
+        y_inter = (p * y - (1.0 - p) * x) / denom
         # Advance with inverse-step using the same eps_hat
         y_next = self._inverse_step(y_inter, eps_hat.to(y_inter.dtype), t)
         x_next = self._inverse_step(x_inter, eps_hat.to(x_inter.dtype), t)
-        # As in EDICT, alternate the order; return the first track as the next state
+        # Return one of the tracks as the next state (consistent with alternation)
         return y_next

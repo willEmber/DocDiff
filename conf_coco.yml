@@ -1,28 +1,28 @@
 # model
-IMAGE_SIZE: [192, 192]   # training uses RandomCrop(IMAGE_SIZE); eval resizes to IMAGE_SIZE when NATIVE_RESOLUTION='False'
-CHANNEL_X: 3             # input channel
-CHANNEL_Y: 3             # output channel
-TIMESTEPS: 100           # diffusion steps
-SCHEDULE: "linear"       # linear or cosine
-MODEL_CHANNELS: 32       # basic channels of Unet
-NUM_RESBLOCKS: 1         # number of residual blocks
+IMAGE_SIZE: [192, 192] # training uses RandomCrop(IMAGE_SIZE); eval resizes to IMAGE_SIZE when NATIVE_RESOLUTION='False'
+CHANNEL_X: 3 # input channel
+CHANNEL_Y: 3 # output channel
+TIMESTEPS: 100 # diffusion steps
+SCHEDULE: "linear" # linear or cosine
+MODEL_CHANNELS: 32 # basic channels of Unet
+NUM_RESBLOCKS: 1 # number of residual blocks
 CHANNEL_MULT: [1, 2, 3, 4]
 NUM_HEADS: 1
 
-MODE: 1                  # 1 Train, 0 Test
-PRE_ORI: "True"          # True: predict x0; False: predict epsilon
+MODE: 1 # 1 Train, 0 Test
+PRE_ORI: "True" # True: predict x0; False: predict epsilon
 
 # experiment/run naming (per‑experiment dirs)
 EXPERIMENT_NAME: "cocoEDICT_192_gauss15"
 
 # train
-PATH_GT: "/data/project/dataset/coco/train2017"          # GT (clean)
+PATH_GT: "/data/project/dataset/coco/train2017" # GT (clean)
 PATH_IMG: "/data/project/dataset/coco/train2017_gauss15" # degraded (same filenames)
-BATCH_SIZE: 64           # adjust by VRAM; try 96–128 if headroom
-NUM_WORKERS: 32          # tune by CPU/IO
-ITERATION_MAX: 200000    # practical target; early stop via validation
-LR: 0.0001               # learning rate
-LOSS: "L2"               # L1 or L2
+BATCH_SIZE: 64 # adjust by VRAM; try 96–128 if headroom
+NUM_WORKERS: 32 # tune by CPU/IO
+ITERATION_MAX: 200000 # practical target; early stop via validation
+LR: 0.0001 # learning rate
+LOSS: "L2" # L1 or L2
 EMA_EVERY: 100
 START_EMA: 2000
 SAVE_MODEL_EVERY: 10000
@@ -39,14 +39,14 @@ EDICT_INV1: "True"
 LAMBDA_INV1: 0.1
 
 # validation
-VAL_EVERY: 5000          # run validation every N iterations (0 disables)
-VAL_MAX_SAMPLES: 16      # cap validation samples per run for speed
+VAL_EVERY: 5000 # run validation every N iterations (0 disables)
+VAL_MAX_SAMPLES: 16 # cap validation samples per run for speed
 VAL_PATH_GT: "/data/project/dataset/coco/val2017"
 VAL_PATH_IMG: "/data/project/dataset/coco/val2017_gauss15"
-SAVE_BEST_BY: "psnr"     # psnr|ssim|inv_mse|inv_cos
+SAVE_BEST_BY: "psnr" # psnr|ssim|inv_mse|inv_cos
 
 # test
-NATIVE_RESOLUTION: "False"   # False: eval at IMAGE_SIZE; True: tile with size=IMAGE_SIZE on native res
+NATIVE_RESOLUTION: "False" # False: eval at IMAGE_SIZE; True: tile with size=IMAGE_SIZE on native res
 DPM_SOLVER: "False"
 DPM_STEP: 20
 # EDICT sampler
@@ -59,4 +59,3 @@ TEST_PATH_IMG: ""
 TEST_INITIAL_PREDICTOR_WEIGHT_PATH: ""
 TEST_DENOISER_WEIGHT_PATH: ""
 TEST_IMG_SAVE_PATH: "./results"
-

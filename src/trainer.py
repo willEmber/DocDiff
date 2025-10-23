@@ -366,9 +366,10 @@ class Trainer:
                     mask = (t < (self.num_timesteps - 1))
                     if mask.any():
                         # Gather coefficients
-                        abar = self.diffusion.gammas  # alphas_cumprod, shape [T]
-                        abar_t = abar.gather(0, t.clamp_min(0)).view(-1, 1, 1, 1)
-                        abar_t1 = abar.gather(0, (t + 1).clamp_max(self.num_timesteps - 1)).view(-1, 1, 1, 1)
+                        abar = self.diffusion.gammas.to(self.device)  # alphas_cumprod, shape [T], possibly float64
+                        # Cast to model dtype for training graph consistency
+                        abar_t = abar.gather(0, t.clamp_min(0)).view(-1, 1, 1, 1).to(noisy_image.dtype)
+                        abar_t1 = abar.gather(0, (t + 1).clamp_max(self.num_timesteps - 1)).view(-1, 1, 1, 1).to(noisy_image.dtype)
                         # True x0 and epsilon
                         x0_true = (gt.to(self.device) - init_predict).detach()  # avoid leaking pixel loss grads
                         eps_true = noise_ref
@@ -381,9 +382,13 @@ class Trainer:
                         # Compute MSE only on valid items (t < T-1)
                         valid_idx = torch.nonzero(mask, as_tuple=False).squeeze(-1)
                         if valid_idx.numel() > 0:
-                            L_inv1 = F.mse_loss(x_t1_hat.index_select(0, valid_idx), x_t1.index_select(0, valid_idx))
+                            # Ensure dtype consistency for loss
+                            L_inv1 = F.mse_loss(
+                                x_t1_hat.index_select(0, valid_idx).to(noisy_image.dtype),
+                                x_t1.index_select(0, valid_idx).to(noisy_image.dtype),
+                            )
 
-                loss = ddpm_loss + self.beta_loss * (pixel_total) / self.num_timesteps + self.lambda_inv1 * L_inv1
+                loss = ddpm_loss + self.beta_loss * (pixel_total) / self.num_timesteps + self.lambda_inv1 * L_inv1.float()
                 loss.backward()
                 optimizer.step()
                 step_time = time.time() - step_start

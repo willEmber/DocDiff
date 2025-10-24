@@ -73,17 +73,23 @@ class EDICTSampler(nn.Module):
 
     def _inverse_step(self, sample: torch.Tensor, eps_pred: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """
-        Inverse of the deterministic step: x_{t+1} given x_t and eps.
-        Derived from the same (a_t, b_t) but solving for next sample.
+        Exact inverse of the deterministic DDIM-style step used in `_denoise_step`.
+
+        Given x_{t-1} and the same epsilon used in the forward step at index `t`,
+        recover x_t via: x_t = (x_{t-1} - b_t * eps) / a_t, where a_t and b_t are
+        computed from (alpha_bar_{t-1}, alpha_bar_t).
         """
         alpha_bar_t = _extract(self.alphas_bar, t, sample.shape).to(sample.dtype)
-        # next index is t+1 (full steps)
-        t_next = (t + 1).clamp(max=self.T - 1)
-        # alpha_bar at next; when t is the final step (T-1), treat next abar as a tiny value for numerical stability
-        alpha_bar_next = _extract(self.alphas_bar, t_next, sample.shape).to(sample.dtype)
-        a_t = (alpha_bar_next / alpha_bar_t).clamp(min=1e-20).sqrt()
-        b_t = (1.0 - alpha_bar_next).clamp(min=0).sqrt() - (
-            (alpha_bar_next * (1.0 - alpha_bar_t)) / alpha_bar_t
+        # prev index is t-1 (matches forward step parameters)
+        t_prev = (t - 1).clamp(min=-1)
+        alpha_bar_prev = torch.where(
+            (t_prev[:, None, None, None] >= 0),
+            _extract(self.alphas_bar, t_prev.clamp_min(0), sample.shape).to(sample.dtype),
+            torch.ones_like(alpha_bar_t),
+        )
+        a_t = (alpha_bar_prev / alpha_bar_t).clamp(min=1e-20).sqrt()
+        b_t = (1.0 - alpha_bar_prev).clamp(min=0).sqrt() - (
+            (alpha_bar_prev * (1.0 - alpha_bar_t)) / alpha_bar_t
         ).clamp(min=1e-20).sqrt()
         return (sample - b_t * eps_pred) / a_t
 

@@ -1,3 +1,4 @@
+# EDICT Scheduler Module官方实现方法
 import torch
 from diffusers import DDIMScheduler
 

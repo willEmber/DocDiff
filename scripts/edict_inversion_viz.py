@@ -6,6 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torchvision.utils import save_image
+import torchvision.transforms.functional as TF
+from PIL import Image, ImageDraw, ImageFont
 
 from src.config import load_config
 from model.DocDiff import DocDiff
@@ -87,6 +89,58 @@ def _minmax_norm(x: torch.Tensor) -> torch.Tensor:
     x_max = x.amax(dim=(1, 2, 3), keepdim=True)
     denom = (x_max - x_min).clamp_min(1e-6)
     return (x - x_min) / denom
+
+
+def _save_labeled_strip(panels, labels, out_path, label_bar: int = 24):
+    """Save a horizontal strip of panels with a text label above each panel.
+    panels: list of torch.Tensor in [0,1], shapes [1,3,H,W] or [3,H,W]
+    labels: list[str], same length as panels
+    """
+    assert len(panels) == len(labels)
+    pil_panels = []
+    widths, heights = [], []
+    for p in panels:
+        if isinstance(p, torch.Tensor):
+            t = p.detach().cpu()
+            if t.dim() == 4:
+                t = t.squeeze(0)
+            t = t.clamp(0, 1)
+            pil = TF.to_pil_image(t)
+        elif isinstance(p, Image.Image):
+            pil = p
+        else:
+            raise TypeError("Panel must be Tensor or PIL.Image")
+        pil_panels.append(pil)
+        widths.append(pil.width)
+        heights.append(pil.height)
+    total_w = int(sum(widths))
+    total_h = int(max(heights) + label_bar)
+    canvas = Image.new("RGB", (total_w, total_h), color=(255, 255, 255))
+    draw = ImageDraw.Draw(canvas)
+    try:
+        font = ImageFont.load_default()
+    except Exception:
+        font = None
+    x = 0
+    for pil, label, w in zip(pil_panels, labels, widths):
+        # Paste panel below the label bar
+        canvas.paste(pil, (x, label_bar))
+        # Draw centered text
+        if font is not None:
+            try:
+                text_w, text_h = draw.textsize(label, font=font)
+            except Exception:
+                text_w, text_h = (len(label) * 6, 11)
+        else:
+            text_w, text_h = (len(label) * 6, 11)
+        tx = x + max(0, (w - text_w) // 2)
+        ty = max(0, (label_bar - text_h) // 2)
+        # outline then white text for readability
+        for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+            draw.text((tx + dx, ty + dy), label, fill=(0, 0, 0), font=font)
+        draw.text((tx, ty), label, fill=(255, 255, 255), font=font)
+        x += w
+    canvas.save(out_path)
 
 
 def main():
@@ -199,18 +253,26 @@ def main():
         inv_mse = F.mse_loss(xT_rec, noisy_full).item()
         inv_cos = torch.nn.functional.cosine_similarity(xT_rec.flatten(1), noisy_full.flatten(1), dim=1).mean().item()
 
-        # Save visualization grids
-        # 1) Reconstruction grid: [input, gt, init_pred, residual(norm), recon]
+        # Save labeled visualization strips
+        # 1) Reconstruction strip with labels
         residual_vis = _minmax_norm(sampled.detach().cpu())
-        grid1 = torch.cat([img.cpu().clamp(0, 1), gt.cpu().clamp(0, 1), init_pred.cpu().clamp(0, 1), residual_vis, recon.cpu().clamp(0, 1)], dim=3)
-        save_image(grid1, os.path.join(out_dir, f"{name[0]}_recon.png"), nrow=1)
+        recon_path = os.path.join(out_dir, f"{name[0]}_recon.png")
+        _save_labeled_strip(
+            panels=[img.cpu().clamp(0, 1), gt.cpu().clamp(0, 1), init_pred.cpu().clamp(0, 1), residual_vis, recon.cpu().clamp(0, 1)],
+            labels=["Input", "GT", "InitPred", "Residual(norm)", "Recon"],
+            out_path=recon_path,
+        )
 
-        # 2) Noise grid: [x_T(norm), xT_rec(norm), |diff|(norm)]
+        # 2) Noise inversion strip with labels
         xT_vis = _minmax_norm(noisy_full.detach().cpu())
         xT_rec_vis = _minmax_norm(xT_rec.detach().cpu())
         diff_vis = _minmax_norm((xT_rec.detach().cpu() - noisy_full.detach().cpu()).abs())
-        grid2 = torch.cat([xT_vis, xT_rec_vis, diff_vis], dim=3)
-        save_image(grid2, os.path.join(out_dir, f"{name[0]}_noise.png"), nrow=1)
+        noise_path = os.path.join(out_dir, f"{name[0]}_noise.png")
+        _save_labeled_strip(
+            panels=[xT_vis, xT_rec_vis, diff_vis],
+            labels=["x_T(norm)", "xT_rec(norm)", "|diff|(norm)"],
+            out_path=noise_path,
+        )
 
         # Persist metrics
         with open(csv_path, 'a') as f:

@@ -50,6 +50,8 @@ def init__result_Dir(experiment_name: str = None):
 
 class Trainer:
     def __init__(self, config):
+        # Keep full config reference for saving effective YAML
+        self._config_obj = config
         self.mode = config.MODE
         self.schedule = Schedule(config.SCHEDULE, config.TIMESTEPS)
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -315,6 +317,24 @@ class Trainer:
         run_id = os.path.basename(save_img_path)
         weight_save_dir = os.path.join(self.weight_save_path, run_id)
         os.makedirs(weight_save_dir, exist_ok=True)
+        # Save the effective config for reproducibility
+        try:
+            cfg_out = os.path.join(save_img_path, 'config.effective.yml')
+            with open(cfg_out, 'w') as f:
+                f.write(self._config_obj.to_yaml() if hasattr(self._config_obj, 'to_yaml') else '')
+        except Exception:
+            pass
+        # Maintain a convenient symlink Training/latest -> this run (best-effort)
+        try:
+            latest_link = os.path.join(os.path.dirname(save_img_path), 'latest')
+            if os.path.islink(latest_link) or os.path.exists(latest_link):
+                try:
+                    os.remove(latest_link)
+                except Exception:
+                    pass
+            os.symlink(save_img_path, latest_link)
+        except Exception:
+            pass
         print('Starting Training', f"Step is {self.num_timesteps}")
         print(f"Run dir: {save_img_path} | Checkpoints: {weight_save_dir}")
         # Metrics CSV in this run directory

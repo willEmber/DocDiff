@@ -13,7 +13,7 @@ MODE: 1 # 1 Train, 0 Test
 PRE_ORI: "True" # True: predict x0; False: predict epsilon
 
 # experiment/run naming (per‑experiment dirs)
-EXPERIMENT_NAME: "cocoEDICT_192_gauss15"
+EXPERIMENT_NAME: "cocoEDICTbase"
 
 # train
 PATH_GT: "/data/project/dataset/coco/train2017" # GT (clean)
@@ -36,7 +36,7 @@ TRAINING_PATH: "./Training"
 BETA_LOSS: 50
 HIGH_LOW_FREQ: "True"
 EDICT_INV1: "True"
-LAMBDA_INV1: 0.1
+LAMBDA_INV1: 0.2
 
 # validation
 VAL_EVERY: 5000 # run validation every N iterations (0 disables)

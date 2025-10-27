@@ -1,0 +1,9 @@
+base: conf.yml
+name: "cocoEDICT_step{TIMESTEPS}_inv{LAMBDA_INV1}"
+grid:
+  TIMESTEPS: [50, 75]
+  LAMBDA_INV1: [0.2, 0.5]
+set:
+  - "EXPERIMENT_NAME="  # will be overridden by name above
+  - "EDICT=True"
+  - "EDICT_FP64=True"

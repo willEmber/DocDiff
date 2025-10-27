@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import contextlib
 from typing import Tuple
 
 
@@ -102,30 +103,30 @@ class EDICTSampler(nn.Module):
         """
         x = x_T.clone()
         y = x_T.clone()
-        if use_fp64:
-            x = x.double()
-            y = y.double()
-        else:
-            x = x.float()
-            y = y.float()
+        # use float64 for EDICT arithmetic, keep network in fp32/fp16
+        work_dtype = torch.float64 if use_fp64 else torch.float32
+        x = x.to(dtype=work_dtype)
+        y = y.to(dtype=work_dtype)
 
-        for time_step in reversed(range(self.T)):
-            t = x_T.new_ones([x_T.shape[0],], dtype=torch.long) * time_step
+        amp_off = torch.autocast(device_type='cuda', enabled=False) if x.is_cuda else contextlib.nullcontext()
+        with amp_off:
+            for time_step in reversed(range(self.T)):
+                t = x_T.new_ones([x_T.shape[0],], dtype=torch.long) * time_step
 
-            # x_inter uses noise predicted from y
-            eps1 = self._pred_eps(y, cond, t, pre_ori)
-            x_inter = self._denoise_step(x, eps1.to(x.dtype), t)
+                # x_inter uses noise predicted from y
+                eps1 = self._pred_eps(y, cond, t, pre_ori).to(dtype=work_dtype)
+                x_inter = self._denoise_step(x, eps1, t).to(dtype=work_dtype)
 
-            # y_inter uses noise predicted from x_inter
-            eps2 = self._pred_eps(x_inter, cond, t, pre_ori)
-            y_inter = self._denoise_step(y, eps2.to(y.dtype), t)
+                # y_inter uses noise predicted from x_inter
+                eps2 = self._pred_eps(x_inter, cond, t, pre_ori).to(dtype=work_dtype)
+                y_inter = self._denoise_step(y, eps2, t).to(dtype=work_dtype)
 
-            # coupled mixing (symmetric, use the two intermediates only)
-            x_prev = p * x_inter + (1.0 - p) * y_inter
-            y_prev = p * y_inter + (1.0 - p) * x_inter
+                # coupled mixing (symmetric, use the two intermediates only)
+                x_prev = p * x_inter + (1.0 - p) * y_inter
+                y_prev = p * y_inter + (1.0 - p) * x_inter
 
-            # alternate order, as in EDICT
-            x, y = y_prev, x_prev
+                # alternate order, as in EDICT
+                x, y = y_prev, x_prev
 
         # Either x or y is a valid x0 candidate; return x cast to fp32
         return x.float()
@@ -139,32 +140,31 @@ class EDICTSampler(nn.Module):
         """
         x = x0_residual.clone()
         y = x0_residual.clone()
-        if use_fp64:
-            x = x.double()
-            y = y.double()
-        else:
-            x = x.float()
-            y = y.float()
+        work_dtype = torch.float64 if use_fp64 else torch.float32
+        x = x.to(dtype=work_dtype)
+        y = y.to(dtype=work_dtype)
 
-        for time_step in range(self.T):
-            t = x0_residual.new_ones([x0_residual.shape[0],], dtype=torch.long) * time_step
+        amp_off = torch.autocast(device_type='cuda', enabled=False) if x.is_cuda else contextlib.nullcontext()
+        with amp_off:
+            for time_step in range(self.T):
+                t = x0_residual.new_ones([x0_residual.shape[0],], dtype=torch.long) * time_step
 
-            # inverse mixing: solve linear system exactly
-            denom = (2.0 * p - 1.0)
-            # avoid division by zero if p=0.5 (not expected in practice; p ~ 0.93)
-            denom = denom if isinstance(denom, float) else float(denom)
-            x_inter = (p * x - (1.0 - p) * y) / denom
-            y_inter = (p * y - (1.0 - p) * x) / denom
+                # inverse mixing: solve linear system exactly
+                denom = (2.0 * p - 1.0)
+                # avoid division by zero if p=0.5 (not expected in practice; p ~ 0.93)
+                denom = denom if isinstance(denom, float) else float(denom)
+                x_inter = (p * x - (1.0 - p) * y) / denom
+                y_inter = (p * y - (1.0 - p) * x) / denom
 
-            # advance to t+1 using inverse of deterministic step
-            eps_y = self._pred_eps(x_inter, cond, t, pre_ori)
-            y_next = self._inverse_step(y_inter, eps_y.to(y_inter.dtype), t)
+                # advance to t+1 using inverse of deterministic step
+                eps_y = self._pred_eps(x_inter, cond, t, pre_ori).to(dtype=work_dtype)
+                y_next = self._inverse_step(y_inter, eps_y, t).to(dtype=work_dtype)
 
-            eps_x = self._pred_eps(y_next, cond, t, pre_ori)
-            x_next = self._inverse_step(x_inter, eps_x.to(x_inter.dtype), t)
+                eps_x = self._pred_eps(y_next, cond, t, pre_ori).to(dtype=work_dtype)
+                x_next = self._inverse_step(x_inter, eps_x, t).to(dtype=work_dtype)
 
-            # alternate
-            x, y = y_next, x_next
+                # alternate
+                x, y = y_next, x_next
 
         return x.float()
 

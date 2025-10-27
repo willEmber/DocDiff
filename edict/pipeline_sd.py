@@ -1,6 +1,7 @@
 from typing import Union, Optional, Callable, List, Dict, Any
 
 import torch
+import contextlib
 from PIL import Image
 from diffusers import StableDiffusionPipeline
 from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion import retrieve_timesteps
@@ -172,10 +173,17 @@ class SDInversionPipeline(StableDiffusionPipeline):
                 x = latents_pair[0].clone()
                 y = latents_pair[1].clone()
 
-                y_inter = (y - (1 - p) * x) / p
-                x_inter = (x - (1 - p) * y_inter) / p
+                # EDICT inverse mixing in float64 for stability
+                amp_off = torch.autocast(device_type='cuda', enabled=False) if x.is_cuda else contextlib.nullcontext()
+                with amp_off:
+                    x_d = x.double()
+                    y_d = y.double()
+                    y_inter_d = (y_d - (1 - p) * x_d) / p
+                    x_inter_d = (x_d - (1 - p) * y_inter_d) / p
 
                 # calculate y_{t+1}
+                model_dtype = prompt_embeds.dtype
+                x_inter = x_inter_d.to(model_dtype)
                 latent_model_input = torch.cat([x_inter] * 2) if self.do_classifier_free_guidance else x_inter
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
                 noise_pred = self.unet(
@@ -190,10 +198,11 @@ class SDInversionPipeline(StableDiffusionPipeline):
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
-                y_next = self.scheduler.inverse_step(noise_pred, t, y_inter)
+                y_next = self.scheduler.inverse_step(noise_pred, t, y_inter_d)
 
                 # calculate x_{t+1}
-                latent_model_input = torch.cat([y_next] * 2) if self.do_classifier_free_guidance else y_next
+                y_next_in = y_next.to(model_dtype)
+                latent_model_input = torch.cat([y_next_in] * 2) if self.do_classifier_free_guidance else y_next_in
                 latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
                 noise_pred = self.unet(
                     latent_model_input,
@@ -207,10 +216,10 @@ class SDInversionPipeline(StableDiffusionPipeline):
                 if self.do_classifier_free_guidance:
                     noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
                     noise_pred = noise_pred_uncond + self.guidance_scale * (noise_pred_text - noise_pred_uncond)
-                x_next = self.scheduler.inverse_step(noise_pred, t, x_inter)
+                x_next = self.scheduler.inverse_step(noise_pred, t, x_inter_d)
 
                 # alternate the order
-                latents_pair = [y_next.clone(), x_next.clone()]
+                latents_pair = [y_next.to(latents.dtype).clone(), x_next.to(latents.dtype).clone()]
 
                 pbar.update(1)
 

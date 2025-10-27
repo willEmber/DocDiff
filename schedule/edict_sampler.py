@@ -121,9 +121,9 @@ class EDICTSampler(nn.Module):
                 eps2 = self._pred_eps(x_inter, cond, t, pre_ori).to(dtype=work_dtype)
                 y_inter = self._denoise_step(y, eps2, t).to(dtype=work_dtype)
 
-                # coupled mixing (symmetric, use the two intermediates only)
+                # EDICT triangular mixing (Eq. 14): second line uses x_prev
                 x_prev = p * x_inter + (1.0 - p) * y_inter
-                y_prev = p * y_inter + (1.0 - p) * x_inter
+                y_prev = p * y_inter + (1.0 - p) * x_prev
 
                 # alternate order, as in EDICT
                 x, y = y_prev, x_prev
@@ -149,12 +149,10 @@ class EDICTSampler(nn.Module):
             for time_step in range(self.T):
                 t = x0_residual.new_ones([x0_residual.shape[0],], dtype=torch.long) * time_step
 
-                # inverse mixing: solve linear system exactly
-                denom = (2.0 * p - 1.0)
-                # avoid division by zero if p=0.5 (not expected in practice; p ~ 0.93)
-                denom = denom if isinstance(denom, float) else float(denom)
-                x_inter = (p * x - (1.0 - p) * y) / denom
-                y_inter = (p * y - (1.0 - p) * x) / denom
+                # EDICT triangular inverse mixing (Eq. 15): sequential demixing
+                # First recover y_inter from current (x, y), then recover x_inter using y_inter
+                y_inter = (y - (1.0 - p) * x) / p
+                x_inter = (x - (1.0 - p) * y_inter) / p
 
                 # advance to t+1 using inverse of deterministic step
                 eps_y = self._pred_eps(x_inter, cond, t, pre_ori).to(dtype=work_dtype)
@@ -176,10 +174,9 @@ class EDICTSampler(nn.Module):
         # Initialize both tracks with the same state
         x = x_t
         y = x_t
-        # Inverse mixing (exact) when both tracks equal collapses to identity
-        denom = (2.0 * p - 1.0)
-        x_inter = (p * x - (1.0 - p) * y) / denom
-        y_inter = (p * y - (1.0 - p) * x) / denom
+        # Triangular inverse mixing; when x==y this collapses to identity
+        y_inter = (y - (1.0 - p) * x) / p
+        x_inter = (x - (1.0 - p) * y_inter) / p
         # Advance with inverse-step using the same eps_hat
         y_next = self._inverse_step(y_inter, eps_hat.to(y_inter.dtype), t)
         x_next = self._inverse_step(x_inter, eps_hat.to(x_inter.dtype), t)

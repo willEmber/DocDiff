@@ -94,6 +94,31 @@ class EDICTSampler(nn.Module):
         ).clamp(min=1e-20).sqrt()
         return (sample - b_t * eps_pred) / a_t
 
+    def _noising_step(self, sample: torch.Tensor, eps_pred: torch.Tensor, t_next: torch.Tensor) -> torch.Tensor:
+        """
+        Deterministic DDIM noising step: compute x_{t_next} from x_{t_next-1}.
+
+        Uses coefficients a_{t_next}, b_{t_next} computed from
+        (alpha_bar_{t_next-1}, alpha_bar_{t_next}). Handles the edge case
+        t_next == T by treating alpha_bar_T = 0 to model the terminal pure-noise state.
+        """
+        # alpha_bar at previous index (t_next - 1); clamp min=0 in practice since t_next>=1
+        alpha_bar_prev = _extract(self.alphas_bar, (t_next - 1).clamp(min=0), sample.shape).to(sample.dtype)
+        # alpha_bar at t_next; when t_next == T (out of range), use 0.0
+        tlen = self.alphas_bar.shape[0]
+        mask = (t_next[:, None, None, None] < tlen)
+        alpha_bar_t = torch.where(
+            mask,
+            _extract(self.alphas_bar, t_next.clamp_max(tlen - 1), sample.shape).to(sample.dtype),
+            torch.zeros_like(alpha_bar_prev),
+        )
+
+        a = (alpha_bar_t / alpha_bar_prev).clamp(min=1e-20).sqrt()
+        b = (1.0 - alpha_bar_t).clamp(min=0).sqrt() - (
+            (alpha_bar_t * (1.0 - alpha_bar_prev)) / alpha_bar_prev
+        ).clamp(min=1e-20).sqrt()
+        return a * sample + b * eps_pred
+
     @torch.no_grad()
     def sample(self, x_T: torch.Tensor, cond: torch.Tensor, pre_ori: bool = True, p: float = 0.93,
                use_fp64: bool = True) -> torch.Tensor:
@@ -174,11 +199,11 @@ class EDICTSampler(nn.Module):
         # Initialize both tracks with the same state
         x = x_t
         y = x_t
-        # Triangular inverse mixing; when x==y this collapses to identity
+        # Triangular inverse mixing (Eq. 15)
         y_inter = (y - (1.0 - p) * x) / p
         x_inter = (x - (1.0 - p) * y_inter) / p
-        # Advance with inverse-step using the same eps_hat
-        y_next = self._inverse_step(y_inter, eps_hat.to(y_inter.dtype), t)
-        x_next = self._inverse_step(x_inter, eps_hat.to(x_inter.dtype), t)
-        # Return one of the tracks as the next state (consistent with alternation)
+        # Use t_next = t + 1 coefficients for a single noising step
+        t_next = (t + 1).clamp_max(self.T)
+        y_next = self._noising_step(y_inter, eps_hat.to(y_inter.dtype), t_next)
+        # For symmetry, x_next could also be computed; for training, return one track
         return y_next

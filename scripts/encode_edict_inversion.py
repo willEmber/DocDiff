@@ -302,7 +302,9 @@ def main():
         stego_margin_mean = float('nan')
         stego_margin_min = float('nan')
         if stego_enabled:
-            assert noisy.shape[0] == 1, "Stego path assumes batch_size=1"
+            # Encode per-sample (assumes batch_size == 1 here). If you later support tiling
+            # (which increases batch), move encoding before tiling or loop over tiles.
+            assert noisy.shape[0] == 1, "Stego path assumes batch_size=1 (no tiling)"
             _, Cn, Hn, Wn = noisy.shape
             L = Hn
             d = Cn * Wn
@@ -318,7 +320,8 @@ def main():
             Z0 = _stego_encode_permutation_torch(U, m)
             if args.stego_sigma and args.stego_sigma > 0:
                 Z0 = Z0 + torch.randn_like(Z0) * float(args.stego_sigma)
-            noisy = _pack_rows_to_xT(Z0, Cn, Hn, Wn)
+            # Pack back to x_T with batch dim
+            noisy = _pack_rows_to_xT(Z0, Cn, Hn, Wn).unsqueeze(0)
 
         init_pred = net.init_predictor(img, torch.zeros(img.shape[0], dtype=torch.long, device=img.device))
         sampled = edict.sample(noisy, init_pred, pre_ori=pre_ori, p=p, use_fp64=use_fp64)
@@ -397,4 +400,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
